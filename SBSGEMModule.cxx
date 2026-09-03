@@ -6295,7 +6295,7 @@ double SBSGEMModule::GetCommonMode( UInt_t isamp, Int_t flag, const mpdmap_t &ap
 
       double cm_min = cm_mean - fCommonModeRange_nsigma*cm_rms;
 
-      //NOTE: this line is only applicable to GEP running after a certain point! Comment out for early GEP analysis or previous expt's.
+      //NOTE: this line is only applicable to GEP running after the CM min value was reduced to zero for the initial averaging iteration in the online CM calculation 
       if( iter == 0 && flag == 6 ) cm_min = 0.0;
       
       double cm_max = cm_mean + fCommonModeRange_nsigma*cm_rms;

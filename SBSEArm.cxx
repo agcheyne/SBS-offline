@@ -152,7 +152,7 @@ THaSpectrometer( name, description )
   fUseDynamicConstraint = false;
 
   fAnalyzerThick = 0.5588; //meters
-  //fSigmaZclose = 0.0015; //about 1.5 mm by default:
+  fSigmaZclose = 0.0015; //about 1.5 mm by default:
   
   fNbinsZBackTrackerConstraint = 1;
 
@@ -278,6 +278,7 @@ Int_t SBSEArm::ReadDatabase( const TDatime& date )
     { "forwardoptics_order", &fForwardOpticsOrder, kInt, 0, 1, 1 },
     { "forwardoptics_parameters", &foptics_param, kDoubleV, 0, 1, 1 },
     { "analyzerthick", &fAnalyzerThick, kDouble, 0, 1, 1 },
+    { "sigmazclose", &fSigmaZclose, kDouble, 0, 1, 1 },
     { "nbinsz_fcp", &fNbinsZBackTrackerConstraint, kInt, 0, 1, 1 },
     {0}
   };
@@ -397,6 +398,8 @@ Int_t SBSEArm::ReadDatabase( const TDatime& date )
       f_oj[i] = int(optics_param[9*i+7]);
       f_oi[i] = int(optics_param[9*i+8]);
     }
+
+    std::cout << "\n\n" << "SBS OPTICS initialization check: fb_pinv[0] = 0.3 * BdL = " << fb_pinv[0] << std::endl << std::endl;
   }
 
   //This code for forward optics modeling is yet-another copy-paste job from SBSBigBite!
@@ -452,6 +455,8 @@ Int_t SBSEArm::ReadDatabase( const TDatime& date )
       f_foj[i] = int(foptics_param[9*i+7]);
       f_foi[i] = int(foptics_param[9*i+8]);
     }
+
+    std::cout << "\n\n" << "SBS FORWARD OPTICS initialization check: fb_xfp[1] = " << fb_xfp[1] << std::endl << std::endl;
   }
   
   fIsInit = true;
@@ -1304,6 +1309,7 @@ Int_t SBSEArm::Track()
 	  }
 	} else { //Back tracker first (similar to GEN-RP mode, but with "better" front constraint calculation):
 	  //ECAL/HCAL-based constraints for the back tracker will have been set in the "region-of-interest" module:
+	  //std::cout << "SBSEArm::Track(): starting tracking in GEP mode with flag non-zero!" << std::endl;
 	  BackTracker->FineProcess( *fTracks );
 	  
 	  if( BackTracker->GetNtracks() > 0 ){ //Then update/re-initialize front tracker constraint(s):
@@ -1352,19 +1358,24 @@ Int_t SBSEArm::Track()
 	      // We need to grab the "best" track info from the back tracker:
 
 	      // We're going to set the back constraint point for the front tracker using the projection of the back track to the point of
-	      // closest approach with the straight line defined by the front tracker constraint point pairs; always choose the pair with the smallest
-	      // sclose (distance of closest approach or DOCA) (perhaps we need to revisit and also look at the scattering angle theta)
+	      // closest approach with the straight line defined by the front tracker constraint point pair(s);
+	      // Make an array of compatible constraint point pairs and add them to the list for the front tracker.
+	      // Always put the pair with smallest sclose (distance of closest approach or DOCA) first (perhaps we need to revisit and consider using the scattering angle theta instead)
 	      
 	      int icp_best = -1;
 	      int ngoodcp = 0;
 	      double minsclose = kBig;
-
+	      double mintheta = kBig; 
 	      //If the back-tracker to front tracker alignment is not good, this calculation will not necessarily work well!
+
+	      vector<int> goodcpidx; //list of all "good" constraint points (those whose closest-approach parameters satisfy constraints!)
 	      
 	      for( int icp=0; icp<FrontTrackerFCPtemp.size(); icp++ ){
+		//slopes implied by constraint point pairs:
 		double xpcp = (FrontTrackerBCPtemp[icp].X() - FrontTrackerFCPtemp[icp].X())/(FrontTrackerBCPtemp[icp].Z()-FrontTrackerFCPtemp[icp].Z());
 		double ypcp = (FrontTrackerBCPtemp[icp].Y() - FrontTrackerFCPtemp[icp].Y())/(FrontTrackerBCPtemp[icp].Z()-FrontTrackerFCPtemp[icp].Z());
 
+		//space coordinates of front constraint point in this pair:
 		double xfcp = FrontTrackerFCPtemp[icp].X();
 		double yfcp = FrontTrackerFCPtemp[icp].Y();
 		double zfcp = FrontTrackerFCPtemp[icp].Z();
@@ -1389,46 +1400,80 @@ Int_t SBSEArm::Track()
 		//be within the defined constraint widths:
 
 		// Check that zclose reconstruction is sane; when zclose reconstructs outside the physical analyzer extent,
-		// usually this is because the scattering angle is small:
+		// usually this is because the scattering angle is small
 
-		//Need to put some safety checks into this calculation for constraint definition purposes 
-		//	zclose = std::max( FrontTracker->GetZmaxLayer(), std::min( BackTracker->GetZminLayer(), zclose ) );
+		//X and Y coordinates of FT and FPP "tracks" at their point of closest approach:
 		
 		double xcloseFT = xfcp + xpcp * (zclose - zfcp);
 		double ycloseFT = yfcp + ypcp * (zclose - zfcp);
 
 		double xcloseFPP = xFPP + xpFPP * zclose;
 		double ycloseFPP = yFPP + ypFPP * zclose;
+
+		// We also want the point of closest approach to be either inside the analyzer, OR
+		// for the "front" and back tracks to also agree at the analyzer midpoint,
+		// which will generally also be satisfied for small-angle scatterings:
 		
+	        double xFTmid = xfcp + xpcp * (fAnalyzerZ0 - zfcp);
+		double yFTmid = yfcp + ypcp * (fAnalyzerZ0 - zfcp);
+
+		double xFPPmid = xFPP + xpFPP * fAnalyzerZ0;
+		double yFPPmid = yFPP + ypFPP * fAnalyzerZ0;
+
+		bool goodzclose = ( fabs( zclose - fAnalyzerZ0 ) <= 0.5*fAnalyzerThick + 5.0*fSigmaZclose/sin(theta) );
+		bool goodprojmid = ( fabs( xFTmid - xFPPmid ) <= fBackConstraintWidthX[0] &&
+				     fabs( yFTmid - yFPPmid ) <= fBackConstraintWidthY[0] );
+				    
 		if( fabs( xcloseFT - xcloseFPP ) <= fBackConstraintWidthX[0] &&
-		    fabs( ycloseFT - ycloseFPP ) <= fBackConstraintWidthY[0] ){
+		    fabs( ycloseFT - ycloseFPP ) <= fBackConstraintWidthY[0] &&
+		    theta < fMaxFPPscatteringAngle &&
+		    (goodzclose || goodprojmid) ){
 		  ngoodcp++;
+
+		  goodcpidx.push_back( icp );
+		  
 		  if( icp_best < 0 || sclose < minsclose ){
 		    icp_best = icp;
 		    minsclose = sclose;
-		    //Store position and direction vectors:
+		    //Store position and direction vectors (not actually used in the current version of this algorithm):
 		    DirFTtemp = dircp;
 		    PosFTtemp = FrontTrackerFCPtemp[icp];
 		  }
 		}		
 	      }
-
+	      
 	      if( ngoodcp > 0 && icp_best >= 0 ){
+
+		// Test a slightly different "back to front" algorithm in which, instead of attempting to re-calculate/redefine the
+		// constraint point pairs for the FT, we simply take ALL existing CP pairs satisfying the "xclose" and "yclose" criteria above:
+
+		//Always put the "best" pair first in the array for convenience:
 		FrontTracker->SetFrontConstraintPoint( FrontTrackerFCPtemp[icp_best] );
-
-		double theta, phi, zclose, sclose;
-		//Calculate the scattering parameters again using the "best" constraint point pair:
-		CalcScatParams( PosFTtemp, DirFTtemp, PosFPPtemp, DirFPPtemp, theta, phi, sclose, zclose );
-
-		//double xcloseFPP = xFPP + xpFPP * zclose;
-		//double ycloseFPP = yFPP + ypFPP * zclose; 
+		FrontTracker->SetBackConstraintPoint( FrontTrackerBCPtemp[icp_best] );
 		
-		// Put a safety check here so that we don't break the constraint setting in SBSGEMTrackerBase;
-		// if zclose is outside this range, it usually means that the polar angle theta is small:
-		double zbcp = std::max( FrontTracker->GetZmaxLayer(), std::min( BackTracker->GetZminLayer(), zclose ) );
+		for( int igoodcp = 0; igoodcp < ngoodcp; igoodcp++ ){
+		  int idxgood = goodcpidx[igoodcp];
+
+		  //Don't add the "best" one twice!
+		  if( idxgood != icp_best ){
+		    FrontTracker->SetFrontConstraintPoint( FrontTrackerFCPtemp[idxgood] ); 
+		    FrontTracker->SetBackConstraintPoint( FrontTrackerBCPtemp[idxgood] );
+		  }
+		}
+     
+		// double theta, phi, zclose, sclose;
+		// //Calculate the scattering parameters again using the "best" constraint point pair:
+		// CalcScatParams( PosFTtemp, DirFTtemp, PosFPPtemp, DirFPPtemp, theta, phi, sclose, zclose );
+
+		// //double xcloseFPP = xFPP + xpFPP * zclose;
+		// //double ycloseFPP = yFPP + ypFPP * zclose; 
 		
-		FrontTracker->SetBackConstraintPoint( xFPP + zbcp * xpFPP, yFPP + zbcp * ypFPP, zbcp ); 
-	      } else { //Just use central value of constraint point assuming zero scattering angle; adjust width accordingly?
+		// // Put a safety check here so that we don't break the constraint setting in SBSGEMTrackerBase;
+		// // if zclose is outside this range, it usually means that the polar angle theta is small:
+		// double zbcp = std::max( FrontTracker->GetZmaxLayer(), std::min( BackTracker->GetZminLayer(), zclose ) );
+		
+		// FrontTracker->SetBackConstraintPoint( xFPP + zbcp * xpFPP, yFPP + zbcp * ypFPP, zbcp ); 
+	      } else { //Just use central value of constraint point assuming zero scattering angle; adjust width of front constraint accordingly:
 		FrontTracker->SetFrontConstraintPoint( fcpcentral );
 		FrontTracker->SetBackConstraintPoint( bcptemp );
 
